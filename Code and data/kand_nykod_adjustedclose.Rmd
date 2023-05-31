@@ -1,0 +1,327 @@
+---
+title: "Skiss optimering"
+author: "Sam Linderoth"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::pdf_document:
+    fig_caption: yes        
+    includes:  
+      in_header: preamble-latex.tex
+---
+
+```{r, message = FALSE}
+
+library(tidyverse)
+library(quantmod)
+
+# Function to optimize portfolio
+opti <- function(x_bar, rets, gamma, type){
+  
+  n <- nrow(rets)
+  k <- ncol(rets)
+  
+  if (type == "bayes"){
+   # Coefficient
+    c_kn <- 1/(n-k-1) + (2*n - k - 1)/(n*(n-k-1)*(n-k-2)) 
+  }
+  
+  if(type == "sample"){
+    c_kn <- 1/(n-1)
+  }
+  
+  # Covariance matrix
+  S <- (n+1)*cov(rets)
+  
+  # Invert
+  S_inv <- solve(S)
+  
+  # Vector of ones
+  ones <- matrix(1:1, nrow = k, ncol = 1)
+  
+  # Normalization denominator
+  den <- as.vector(t(ones) %*% S_inv %*% ones)
+  
+  # Q matrix
+  Q <-  S_inv - (S_inv %*% ones %*% t(ones) %*% S_inv)/
+                den
+  
+  # Quantites for MV
+  w_mv <- (S_inv %*% ones)/den + gamma^(-1)*c_kn^(-1)*Q %*% x_bar
+  
+  r_mv <- (t(ones) %*% S_inv %*% x_bar)/den + 
+        (t(x_bar) %*% Q %*% x_bar)/(gamma*c_kn)
+  
+  v_mv <- c_kn/den + 
+          (t(x_bar) %*% Q %*% x_bar)/(gamma^2 * c_kn)
+  
+  return(list(r_mv, v_mv, w_mv, S, type))
+  
+}
+
+
+# Simulation
+sim <- function(weights, x_bar, n_samp, cov, n, k){
+  
+  samp_store <- c()
+  
+  for (i in 1:n_samp){
+    
+    t_1 <- rt(n = 1, df = n-k)
+    t_2 <- rt(n = 1, df = n-k+1)
+    
+    samp <- t(weights) %*% x_bar +
+            (sqrt(t(weights) %*% cov %*% weights))*(t_1/(sqrt(n*(n-k))) + 
+                                          sqrt(1 + t_1^2/(n-k))*(t_2/sqrt(n-k+1)))
+    
+    samp_store <- c(samp_store, samp)
+    
+  }
+  
+  return(samp_store)
+  
+}
+
+```
+
+
+
+```{r}
+
+# Chunk to fetch data
+
+# List over OMXS30 stocks
+stonks <- c('ABB.ST', 'ALFA.ST', 'ALIV-SDB.ST',
+            'ASSA-B.ST', 'ATCO-A.ST', 'ATCO-B.ST', 'AZN.ST',
+            'BOL.ST', 'ELUX-B.ST',
+            'ERIC-B.ST', 'ESSITY-B.ST',
+            'EVO.ST', 'GETI-B.ST',
+            'HEXA-B.ST', 'HM-B.ST',
+            'INVE-B.ST', 'KINV-B.ST',
+            'NDA-SE.ST', 'NIBE-B.ST',
+            'SAND.ST', 'SBB-B.ST',
+            'SCA-B.ST', 'SEB-A.ST', 
+            'SHB-A.ST', 'SINCH.ST',
+            'SKF-B.ST', 'SWED-A.ST',
+            'TEL2-B.ST', 'TELIA.ST',
+            'VOLV-B.ST')
+
+# Initialize price df
+price_df <- getSymbols('^OMX', auto.assign = FALSE,
+                       periodicity = "weekly") %>%
+       as.data.frame() %>%
+       rownames_to_column("date") %>%
+       mutate(date = as.Date(date)) %>%
+       filter(date >= as.Date("2018-01-01")) %>%
+       select(date, ends_with("Adjusted"))
+
+# Initialize return df
+ret_df <- getSymbols('^OMX', auto.assign = FALSE,
+           periodicity = "weekly") %>%
+           as.data.frame() %>%
+           rownames_to_column("date") %>%
+           mutate(date = as.Date(date)) %>%
+           select(date, ends_with("Adjusted")) %>%
+           mutate(rets = -(.[[2]] - lag(.[[2]]))/lag(.[[2]])) %>%
+           filter(date >= as.Date("2018-01-01")) %>%
+           select(date, rets) %>%
+           rename_with(.fn = ~paste('OMXS30_SHORT'), .cols = ends_with("rets"))
+
+# Loop to fetch stock prices/returns
+for (i in 1:length(stonks)){
+  
+  # Fetch data
+  dat <- getSymbols(stonks[i], auto.assign = FALSE, 
+                    periodicity = "weekly") %>%
+         as.data.frame() %>%
+         rownames_to_column("date")
+  
+  # Fetch and wrangle prices
+  price_dat <- dat %>%
+       filter(date >= as.Date("2018-01-01")) %>%
+       select(-date) %>%
+       select(ends_with("Adjusted"))
+  
+  # Fetch and wrangle returns
+  ret_dat <- dat %>%
+       mutate(date = as.Date(date)) %>%
+       select(date, ends_with("Adjusted")) %>%
+       mutate(rets = (.[[2]] - lag(.[[2]]))/lag(.[[2]])) %>%
+       filter(date >= as.Date("2018-01-01")) %>%
+       select(-date) %>%
+       select(rets)
+  
+  colnames(price_dat) <- c(stonks[i])
+  price_df <- cbind(price_df, price_dat)
+  
+  colnames(ret_dat) <- c(stonks[i])
+  ret_df <- cbind(ret_df, ret_dat)
+  
+}
+
+
+df_test <- ret_df %>% slice(255:274) %>% 
+  select(-date) %>% 
+  as.matrix()
+
+ret_df <- ret_df #%>% slice(1:254)
+
+meanvector <- t(ret_df %>%
+              summarise(across(where(is.numeric), 
+                       ~ mean(.x, na.rm = TRUE))) %>%
+              as.matrix())
+
+return_mat <- ret_df %>% select(-date) %>%
+              as.matrix()
+
+df_bay <- data.frame()
+df_samp <- data.frame()
+
+for (i in 1:500){
+  
+  bay_eff <- opti(meanvector, return_mat, i, type = "bayes")
+  sample_eff <- opti(meanvector, return_mat, i, type = "sample")
+  
+  df_bay <- rbind(df_bay, c(bay_eff[1], bay_eff[2]))
+  df_samp <- rbind(df_samp, c(sample_eff[1], sample_eff[2]))
+  
+}
+
+df_bay <- cbind(df_bay, rep("Bayes (obj)",nrow(df_bay)))
+colnames(df_bay) <- c("ret", "var", "type")
+
+df_samp <- cbind(df_samp, rep("Sample",nrow(df_samp)))
+colnames(df_samp) <- c("ret", "var", "type")
+
+df <- rbind(df_bay, df_samp)
+
+colnames(df) <- c("ret", "var", "type")
+
+
+```
+
+
+
+
+```{r}
+
+ggplot(df, 
+       aes(x = var, 
+           y = ret,
+           color = as.factor(type))) +
+  geom_line() +
+  theme_classic() +
+  labs(x = "V",
+       y = "R") +
+  guides(color = guide_legend(title="Type"))
+
+```
+
+
+
+
+```{r, eval = FALSE}
+
+b <- opti(meanvector, return_mat, gamma = 10, type = "bayes")
+
+we <- b[[3]]
+median_b <- round(b[[1]], 3)
+stdev_b <- round(sqrt(b[[2]]), 3)
+
+test_results <- df_test %*% we
+mean_test <- round(mean(test_results), 3)
+sd_test <- round(sd(test_results), 3)
+max_test <- round(max(test_results), 3)
+min_test <- round(min(test_results), 3)
+
+tab <- data.frame(Model = c(mean_b, stdev_b, "NA", "NA"),
+                  Data = c(mean_test, sd_test, max_test, min_test))
+
+rownames(tab) <- c("Mean", "Stdev", "Max", "Min")
+
+prices <- price_df %>% 
+          slice(nrow(price_df)-1) %>% 
+          select(-date) %>% 
+          as.matrix() %>% t()
+
+prices[1] <- 1
+buy_sum <- 20000
+
+buy_table <- data.frame(Number = round((we*buy_sum)/prices), Sum = (we*buy_sum))
+
+knitr::kable(buy_table)
+knitr::kable(tab)
+
+tr <- return_mat %*% we
+
+sims <- sim(we, meanvector, 274, b[[4]], nrow(return_mat), ncol(return_mat))
+
+hist(sims)
+hist(tr)
+```
+
+
+
+```{r}
+
+s <- b[[4]]
+
+simm222 <- sim(b[[3]], meanvector, 10000, s, nrow(return_mat), ncol(return_mat))
+
+sd(simm222)
+
+
+```
+
+
+
+
+
+
+
+```{r}
+
+library(HDShOP)
+
+p = ncol(return_mat)
+n = nrow(return_mat)
+gamma <- 10
+mu = seq(0.2,-0.2, length.out=p)
+Sigma = RandCovMtrx(p=p)
+
+x <- t(return_mat)
+
+EW_port <- rep(1/p, length=p)
+MV_shr_port <- new_MV_portfolio_weights_BDOPS21(x=x, gamma=gamma, b=EW_port, beta=0.05)$weights
+GMV_shr_port <- new_MV_portfolio_weights_BDOPS21(x=x, gamma=Inf, b=EW_port, beta=0.05)$weights
+MV_trad_port <- new_MV_portfolio_traditional(x=x, gamma=gamma)$weights
+GMV_trad_port <- new_MV_portfolio_traditional(x=x, gamma=Inf)$weights
+
+weights.eff = cbind(EW_port, MV_shr_port, GMV_shr_port, MV_trad_port, GMV_trad_port)
+colnames(weights.eff) <- c("EW", "MV_shr", "GMV_shr", "MV_trad", "GMV_trad")
+
+
+Fplot <- plot_frontier(x, weights.eff)
+Fplot
+
+```
+
+```{r}
+
+ggplot(df, 
+       aes(x = sqrt(var), 
+           y = ret,
+           color = as.factor(type))) +
+  geom_line() +
+  theme_bw() +
+  labs(x = "V",
+       y = "R") +
+  guides(color = guide_legend(title="Type")) +
+  ylim(0, 0.015) +
+  xlim(0, 0.048) +
+  theme(legend.position = "none")
+
+
+```
+
+
+

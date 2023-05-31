@@ -1,0 +1,457 @@
+---
+title: "Skiss optimering"
+author: "Sam Linderoth"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::pdf_document
+---
+
+```{r, message = FALSE}
+
+library(tidyverse)
+library(quantmod)
+
+# Function to optimize portfolio
+opti <- function(x_bar, rets, gamma, type, d = nrow(rets), r = nrow(rets)){
+  
+  n <- nrow(rets)
+  k <- ncol(rets)
+  
+  
+  if(type == "sample"){
+    c_kn <- 1/(n-1)
+  }
+  
+  if (type == "jeff"){
+   # Coefficient
+    c_kn <- 1/(n-k-1) + (2*n - k - 1)/(n*(n-k-1)*(n-k-2)) 
+  }
+  
+  if (type == "conj"){
+   # Coefficient
+    c_kn <- 1/(n+d-2*k-1) + (2*n+r+d-2*k-1)/((n+r)*(n+d-2*k-1)*(n+d-2*k-2))
+  }
+  
+  # Covariance matrix
+  S <- (n+1)*cov(rets)
+  
+  # Invert
+  S_inv <- solve(S)
+  
+  # Vector of ones
+  ones <- matrix(1:1, nrow = k, ncol = 1)
+  
+  # Normalization denominator
+  den <- as.vector(t(ones) %*% S_inv %*% ones)
+  
+  # Q matrix
+  Q <-  S_inv - (S_inv %*% ones %*% t(ones) %*% S_inv)/
+                den
+  
+  # Quantites for MV
+  w_mv <- (S_inv %*% ones)/den + gamma^(-1)*c_kn^(-1)*Q %*% x_bar
+  
+  r_mv <- (t(ones) %*% S_inv %*% x_bar)/den + 
+        (t(x_bar) %*% Q %*% x_bar)/(gamma*c_kn)
+  
+  v_mv <- c_kn/den + 
+          (t(x_bar) %*% Q %*% x_bar)/(gamma^2 * c_kn)
+  
+  return(list(ret = r_mv, var = v_mv, weights = w_mv, covmat = S, typeof = type))
+  
+}
+
+
+# Simulation
+sim_jeff <- function(weights, x_bar, n_samp, cov, n, k){
+  
+  samp_store <- c()
+  
+  for (i in 1:n_samp){
+    
+    t_1 <- rt(n = 1, df = n-k)
+    t_2 <- rt(n = 1, df = n-k+1)
+    
+    samp <- t(weights) %*% x_bar +
+            (sqrt(t(weights) %*% cov %*% weights))*(t_1/(sqrt(n*(n-k))) + 
+                                          sqrt(1 + t_1^2/(n-k))*(t_2/sqrt(n-k+1)))
+    
+    samp_store <- c(samp_store, samp)
+    
+  }
+  
+  return(samp_store)
+  
+}
+
+sim_con <- function(weights, x_bar, n_samp, cov, n, k, d = n, r = n){
+  
+  samp_store <- c()
+  
+  for (i in 1:n_samp){
+    
+    t_1 <- rt(n = 1, df = n+d-2*k)
+    t_2 <- rt(n = 1, df = n+d-2*k+1)
+    
+    samp <- t(weights) %*% x_bar +
+            (sqrt(t(weights) %*% cov %*% weights))*(t_1/(sqrt((n+r)*(n+d-2*k))) + 
+                                          sqrt(1 + t_1^2/(n+d-2*k))*(t_2/sqrt(n+d-2*k+1)))
+    
+    samp_store <- c(samp_store, samp)
+    
+  }
+  
+  return(samp_store)
+  
+}
+
+```
+
+
+
+```{r, message = FALSE, echo = FALSE}
+
+ret_date <- read_csv("returns.csv") %>% 
+            filter(date < as.Date("2023-01-01"))
+
+dates <- ret_date %>% select(date)
+
+ret_date_log <- log(ret_date %>% select(-date) + 1)
+ret_date_log <- cbind(dates, ret_date_log)
+
+result_jeff_df <- data.frame()
+
+# Set time period
+tp <- 52
+
+# Start loop from t = 0 to t = tp
+for (i in 0:(tp-1)){
+  
+  # Log returns
+  ret_date <- ret_date_log
+  
+  # Slice return matrix for model
+  return_mat <- ret_date %>% 
+                select(-date) %>%
+                slice((i+1):(nrow(ret_date)-tp+i))
+  
+  # Create mean vector
+  meanvector <- t(return_mat %>%
+              summarise(across(where(is.numeric), 
+                       ~ mean(.x, na.rm = TRUE))))
+  
+  # Slice return mat for OOS returns
+  oos_return <- ret_date %>% 
+                select(-date) %>%
+                slice(nrow(ret_date)-(tp-1)+i) %>%
+                as.matrix()
+  
+
+  
+  # Get optimization results
+  optim <- opti(meanvector, return_mat, 50, "jeff")
+  
+  # Simulate
+  sims <- sim_jeff(optim$weights, meanvector, 10000, optim$covmat, 
+                  nrow(return_mat), ncol(return_mat))
+  
+  # Fetch OOS return for model weights
+  oos_result <- oos_return %*% optim$weights
+  
+  quantiles <- quantile(sims, probs = c(0.025, 0.975))
+  
+  # Store results
+  result_vec <- c(optim$ret, oos_result, optim$var, 
+                  quantiles[[1]], quantiles[[2]])
+  
+  result_jeff_df <- rbind(result_jeff_df, result_vec)
+  
+}
+
+result_jeff_df <- cbind(seq(1:tp), result_jeff_df)
+
+colnames(result_jeff_df) <- c("index", "model_mean", "oos_result", "model_var", "q05", "q95")
+
+ggplot(data = result_jeff_df,
+       mapping = aes(x = index)) + 
+  geom_line(aes(y = model_mean, color = "Model Estimated Mean")) +
+  geom_point(aes(y = oos_result, fill = "OOS Empirical Result")) +
+  geom_line(aes(y = q05, linetype = "95 % Credibility Interval")) +
+  geom_line(aes(x = index, y = q95), linetype = "dashed") +
+  scale_color_manual(name = "", values = c("Model Estimated Mean" = "red"))+
+  scale_fill_manual(name = "", values = c("OOS Empirical Result" = "black"))+
+  scale_linetype_manual(name = "", values = c("95 % Credibility Interval" = "dashed")) +
+  labs(x = "Week",
+       y = "Return",
+       title = "Diagram X: Results for Jeffreys prior") +
+  theme_classic()
+
+print("var")
+max(result_jeff_df$model_var)
+mean(result_jeff_df$model_var)
+min(result_jeff_df$model_var)
+var(result_jeff_df$oos_result)
+
+print("mean")
+max(result_jeff_df$model_mean)
+mean(result_jeff_df$model_mean)
+min(result_jeff_df$model_mean)
+mean(result_jeff_df$oos_result)
+
+```
+```{r, message = FALSE, echo = FALSE}
+
+result_samp_df <- data.frame()
+
+# Set time period
+tp <- 52
+
+# Start loop from t = 0 to t = tp
+for (i in 0:(tp-1)){
+  
+  # Log returns
+  ret_date <- ret_date_log
+  
+  # Slice return matrix for model
+  return_mat <- ret_date %>% 
+                select(-date) %>%
+                slice((i+1):(nrow(ret_date)-tp+i))
+  
+  # Create mean vector
+  meanvector <- t(return_mat %>%
+              summarise(across(where(is.numeric), 
+                       ~ mean(.x, na.rm = TRUE))))
+  
+  # Slice return mat for OOS returns
+  oos_return <- ret_date %>% 
+                select(-date) %>%
+                slice(nrow(ret_date)-(tp-1)+i) %>%
+                as.matrix()
+  
+
+  
+  # Get optimization results
+  optim <- opti(meanvector, return_mat, 50, "sample")
+  
+  # Simulate
+#  sims <- sim_jeff(optim$weights, meanvector, 10000, optim$covmat, 
+ #                 nrow(return_mat), ncol(return_mat))
+  
+  # Fetch OOS return for model weights
+  oos_result <- oos_return %*% optim$weights
+  
+ # quantiles <- quantile(sims, probs = c(0.025, 0.975))
+  
+  # Store results
+  result_vec <- c(optim$ret, oos_result, optim$var)
+  
+  result_samp_df <- rbind(result_samp_df, result_vec)
+  
+}
+
+result_samp_df <- cbind(seq(1:tp), result_samp_df)
+
+colnames(result_samp_df) <- c("index", "model_mean", "oos_result", "model_var")
+
+ggplot(data = result_samp_df,
+       mapping = aes(x = index)) + 
+  geom_line(aes(y = model_mean, color = "Model Estimated Mean")) +
+  geom_point(aes(y = oos_result, fill = "OOS Empirical Result")) +
+  scale_color_manual(name = "", values = c("Model Estimated Mean" = "red"))+
+  scale_fill_manual(name = "", values = c("OOS Empirical Result" = "black"))+
+  labs(x = "Week",
+       y = "Return",
+       title = "Diagram X: Results for sample method") +
+  theme_classic()
+
+
+
+
+
+print("var")
+max(result_samp_df$model_var)
+mean(result_samp_df$model_var)
+min(result_samp_df$model_var)
+var(result_samp_df$oos_result)
+
+print("mean")
+max(result_samp_df$model_mean)
+mean(result_samp_df$model_mean)
+min(result_samp_df$model_mean)
+mean(result_samp_df$oos_result)
+
+```
+```{r}
+
+result_conj_df <- data.frame()
+
+# Set time period
+tp <- 52
+
+# Start loop from t = 0 to t = tp
+for (i in 0:(tp-1)){
+  
+  # Log returns
+  ret_date <- ret_date_log
+  
+  # Slice return matrix for model
+  return_mat <- ret_date %>% 
+                select(-date) %>%
+                slice((i+1):(nrow(ret_date)-tp+i))
+  
+  # Create mean vector
+  meanvector <- t(return_mat %>%
+              summarise(across(where(is.numeric), 
+                       ~ mean(.x, na.rm = TRUE))))
+  
+  # Slice return mat for OOS returns
+  oos_return <- ret_date %>% 
+                select(-date) %>%
+                slice(nrow(ret_date)-(tp-1)+i) %>%
+                as.matrix()
+  
+  
+  # Get optimization results
+  optim <- opti(meanvector, return_mat, 50, "conj")
+  
+  d_0 <- nrow(return_mat)
+  r_0 <- nrow(return_mat)
+  
+  # Simulate
+  sims <- sim_con(optim$weights, meanvector, 10000, optim$covmat, 
+                  nrow(return_mat), ncol(return_mat), d = d_0, r = r_0)
+  
+  # Fetch OOS return for model weights
+  oos_result <- oos_return %*% optim$weights
+  
+  quantiles <- quantile(sims, probs = c(0.025, 0.975))
+  
+  # Store results
+  result_vec <- c(optim$ret, oos_result, optim$var, 
+                  quantiles[[1]], quantiles[[2]])
+  
+  result_conj_df <- rbind(result_conj_df, result_vec)
+  
+}
+
+result_conj_df <- cbind(seq(1:tp), result_conj_df)
+
+colnames(result_conj_df) <- c("index", "model_mean", "oos_result", "model_var", "q05", "q95")
+
+ggplot(data = result_conj_df,
+       mapping = aes(x = index)) + 
+  geom_line(aes(y = model_mean, color = "Model Estimated Mean")) +
+  geom_point(aes(y = oos_result, fill = "OOS Empirical Result")) +
+  geom_line(aes(y = q05, linetype = "95 % Credibility Interval")) +
+  geom_line(aes(x = index, y = q95), linetype = "dashed") +
+  scale_color_manual(name = "", values = c("Model Estimated Mean" = "red"))+
+  scale_fill_manual(name = "", values = c("OOS Empirical Result" = "black"))+
+  scale_linetype_manual(name = "", values = c("95 % Credibility Interval" = "dashed")) +
+  labs(x = "Week",
+       y = "Return",
+       title = "Diagram X: Results for conjugate prior") +
+  theme_classic()
+
+```
+
+
+```{r}
+
+results_omx_df <- data.frame()
+
+omx_weights <- matrix(nrow = 30, ncol = 1,
+                       c(3.08, 2.41,
+                            4.98, 4.38,
+                            8.42, 3.54,
+                            0.89, 1.93,
+                            0.77, 3.98,
+                            3.17, 4.67,
+                            1.22, 3.52,
+                            6.04, 6.96,
+                            0.72, 3.47,
+                            0.46, 4.61,
+                            0.46, 5.35,
+                            1.46, 1.76,
+                            4.23, 3.91,
+                            3.67, 1.28,
+                            2.52, 6.14)/100)
+
+tp <- 52
+
+# Start loop from t = 0 to t = tp
+for (i in 0:(tp-1)){
+  
+  # Log returns
+  ret_date <- ret_date_log
+  
+  # Slice return mat for OOS returns
+  oos_return <- ret_date %>% 
+                select(-date) %>%
+                slice(nrow(ret_date)-(tp-1)+i) %>%
+                as.matrix()
+
+  # Fetch OOS return for model weights
+  oos_result <- oos_return %*% omx_weights
+  
+  
+  results_omx_df <- rbind(results_omx_df, oos_result)
+  
+}
+
+colnames(results_omx_df) <- c("ret")
+
+```
+
+```{r}
+
+wilcox.test(result_conj_df$oos_result, results_omx_df$ret, paired = TRUE,
+mu=0, alternative="two.sided", conf.level=0.95, conf.int=TRUE)
+
+
+
+```
+
+
+```{r}
+
+df_bay <- data.frame()
+df_samp <- data.frame()
+
+# Efficient frontier
+
+for (i in 1:500){
+  
+  #i <- i/10
+  
+  d_0 <- 5
+  r_0 <- 5
+  
+  bay_eff <- opti(meanvector, return_mat, i, type = "conj", d = d_0, r = r_0)
+  sample_eff <- opti(meanvector, return_mat, i, type = "sample")
+  
+  df_bay <- rbind(df_bay, c(bay_eff[1], bay_eff[2]))
+  df_samp <- rbind(df_samp, c(sample_eff[1], sample_eff[2]))
+  
+}
+
+df_bay <- cbind(df_bay, rep("Bayes (obj)",nrow(df_bay)))
+colnames(df_bay) <- c("ret", "var", "type")
+
+df_samp <- cbind(df_samp, rep("Sample",nrow(df_samp)))
+colnames(df_samp) <- c("ret", "var", "type")
+
+df <- rbind(df_bay, df_samp)
+
+colnames(df) <- c("ret", "var", "type")
+
+ggplot(df, 
+       aes(x = var, 
+           y = ret,
+           color = as.factor(type))) +
+  geom_line() +
+  theme_classic() +
+  labs(x = "V",
+       y = "R") +
+  guides(color = guide_legend(title="Type"))
+
+```
