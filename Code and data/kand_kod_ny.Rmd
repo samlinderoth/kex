@@ -153,7 +153,9 @@ df_samp <- data.frame()
 
 # Efficient frontier
 
-for (i in 1:500){
+for (i in 5:500){
+  
+  i <- i/2
   
   d_0 <- nrow(return_mat)
   r_0 <- nrow(return_mat)
@@ -218,7 +220,7 @@ tp <- 52
 for (i in 0:(tp-1)){
   
   # Log returns
-  ret_date <- ret_date_log
+  #ret_date <- ret_date_log
   
   # Slice return matrix for model
   return_mat <- ret_date %>% 
@@ -273,7 +275,7 @@ ggplot(data = result_jeff_df,
   scale_linetype_manual(name = "", values = c("95 % Credibility Interval" = "dashed")) +
   labs(x = "Week",
        y = "Return",
-       title = "Diagram X: Results for Jeffreys prior") +
+       title = "Diagram X: Results for Jeffreys prior, n = 52") +
   theme_classic() +
   theme(plot.title = element_text(hjust = 0.5))
 
@@ -281,6 +283,98 @@ ggplot(data = result_jeff_df,
 
 ```
 
+
+```{r}
+
+
+result_jeff_df %>% mutate(within_inter = case_when(oos_result < q05 ~ "no",
+                                                   oos_result > q95 ~ "no",
+                                                   TRUE ~ "yes"))
+
+```
+
+
+```{r, message = FALSE, echo = FALSE}
+
+result_jeff_df <- data.frame()
+
+# Set time period
+tp <- 104
+
+# Start loop from t = 0 to t = tp
+for (i in 0:(tp-1)){
+  
+  # Log returns
+  #ret_date <- ret_date_log
+  
+  # Slice return matrix for model
+  return_mat <- ret_date %>% 
+                select(-date) %>%
+                slice((i+1):(nrow(ret_date)-tp+i))
+  
+  # Create mean vector
+  meanvector <- t(return_mat %>%
+              summarise(across(where(is.numeric), 
+                       ~ mean(.x, na.rm = TRUE))))
+  
+  # Slice return mat for OOS returns
+  oos_return <- ret_date %>% 
+                select(-date) %>%
+                slice(nrow(ret_date)-(tp-1)+i) %>%
+                as.matrix()
+  
+
+  
+  # Get optimization results
+  optim <- opti(meanvector, return_mat, 50, "jeff")
+  
+  # Simulate
+  sims <- sim_jeff(optim$weights, meanvector, 10000, optim$covmat, 
+                  nrow(return_mat), ncol(return_mat))
+  
+  # Fetch OOS return for model weights
+  oos_result <- oos_return %*% optim$weights
+  
+  quantiles <- quantile(sims, probs = c(0.025, 0.975))
+  
+  # Store results
+  result_vec <- c(optim$ret, oos_result, optim$var, 
+                  quantiles[[1]], quantiles[[2]])
+  
+  result_jeff_df <- rbind(result_jeff_df, result_vec)
+  
+}
+
+result_jeff_df <- cbind(seq(1:tp), result_jeff_df)
+
+colnames(result_jeff_df) <- c("index", "model_mean", "oos_result", "model_var", "q05", "q95")
+
+ggplot(data = result_jeff_df,
+       mapping = aes(x = index)) + 
+  geom_line(aes(y = model_mean, color = "Model Estimated Mean")) +
+  geom_point(aes(y = oos_result, fill = "OOS Empirical Result")) +
+  geom_line(aes(y = q05, linetype = "95 % Credibility Interval")) +
+  geom_line(aes(x = index, y = q95), linetype = "dashed") +
+  scale_color_manual(name = "", values = c("Model Estimated Mean" = "red"))+
+  scale_fill_manual(name = "", values = c("OOS Empirical Result" = "black"))+
+  scale_linetype_manual(name = "", values = c("95 % Credibility Interval" = "dashed")) +
+  labs(x = "Week",
+       y = "Return",
+       title = "Diagram X: Results for Jeffreys prior, n = 104") +
+  theme_classic() +
+  theme(plot.title = element_text(hjust = 0.5))
+
+
+
+```
+
+```{r}
+
+result_jeff_df %>% mutate(within_inter = case_when(oos_result < q05 ~ "no",
+                                                   oos_result > q95 ~ "no",
+                                                   TRUE ~ "yes")) %>% filter(within_inter == "no")
+
+```
 
 ```{r, echo = FALSE}
 
@@ -293,7 +387,7 @@ tp <- 52
 for (i in 0:(tp-1)){
   
   # Log returns
-  ret_date <- ret_date_log
+  #ret_date <- ret_date_log
   
   # Slice return matrix for model
   return_mat <- ret_date %>% 
@@ -385,7 +479,7 @@ tp <- 52
 for (i in 0:(tp-1)){
   
   # Log returns
-  ret_date <- ret_date_log
+  #ret_date <- ret_date_log
   
   # Slice return mat for OOS returns
   oos_return <- ret_date %>% 
@@ -405,6 +499,8 @@ colnames(results_omx_df) <- c("ret")
 
 ```
 
+
+
 ```{r, message = FALSE, echo = FALSE}
 
 result_samp_df <- data.frame()
@@ -416,7 +512,7 @@ tp <- 52
 for (i in 0:(tp-1)){
   
   # Log returns
-  ret_date <- ret_date_log
+  #ret_date <- ret_date_log
   
   # Slice return matrix for model
   return_mat <- ret_date %>% 
@@ -470,7 +566,6 @@ ggplot(data = result_samp_df,
        title = "Diagram X: Results for sample method") +
   theme_classic() + 
   theme(plot.title = element_text(hjust = 0.5))
-
 
 
 ```
